@@ -446,7 +446,7 @@ pub fn build_executors<S: Storage + 'static, F: KvFormat>(
                     .collect_vec();
 
                 if partition_by.is_empty() {
-                    if d.get_truncate_key_expr().len() > 0 {
+                    if !d.get_truncate_key_expr().is_empty() {
                         Box::new(
                             BatchLimitExecutor::new_rank_limit(
                                 executor,

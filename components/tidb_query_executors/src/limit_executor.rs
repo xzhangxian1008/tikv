@@ -65,13 +65,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         config: Arc<EvalConfig>,
         truncate_key_exp: Vec<RpnExpression>,
     ) -> Result<Self> {
-        return Self::new_rank_limit_impl(
-            src,
-            limit,
-            is_src_scan_executor,
-            config,
-            truncate_key_exp,
-        );
+        Self::new_rank_limit_impl(src, limit, is_src_scan_executor, config, truncate_key_exp)
     }
 
     pub fn new_rank_limit_impl(
@@ -153,7 +147,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                 &mut self.context,
                 &self.truncate_keys_exps,
                 src_schema,
-                &mut result.physical_columns,
+                &result.physical_columns,
                 &result.logical_rows,
                 &mut self.current_truncate_keys_unsafe,
             );
@@ -210,7 +204,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                 &mut self.context,
                 &self.truncate_keys_exps,
                 src_schema,
-                &mut result.physical_columns,
+                &result.physical_columns,
                 &result.logical_rows,
                 &mut self.current_truncate_keys_unsafe,
             );
@@ -231,7 +225,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                 cur_truncate_keys_ref.push(cur_truncate_key_result.get_logical_scalar_ref(i));
             }
 
-            if self.prev_truncate_keys.len() == 0 {
+            if self.prev_truncate_keys.is_empty() {
                 self.prev_truncate_keys.extend(
                     cur_truncate_keys_ref
                         .drain(..)
@@ -283,7 +277,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
 
             i += 1;
         }
-        return Ok(i);
+        Ok(i)
     }
 }
 
@@ -317,13 +311,13 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
             scan_rows
         };
 
-        if self.truncate_keys_exps.len() > 0 {
+        if !self.truncate_keys_exps.empty() {
             #[cfg(debug_assertions)]
             {
                 self.executed_in_rank_limit_for_test = true;
             }
 
-            if self.remaining_rows == 0 && self.prev_truncate_keys.len() == 0 {
+            if self.remaining_rows == 0 && self.prev_truncate_keys.is_empty() {
                 return BatchExecuteResult {
                     physical_columns: LazyBatchColumnVec::empty(),
                     logical_rows: Vec::new(),
