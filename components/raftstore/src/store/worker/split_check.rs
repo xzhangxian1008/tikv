@@ -253,17 +253,22 @@ impl BucketStatsInfo {
         // The bucket ranges is none when the region buckets is also none.
         // So this condition indicates that the region buckets needs to refresh not
         // renew.
-        if let Some(bucket_ranges) = bucket_ranges
-            && self.bucket_stat.is_some()
-        {
-            assert_eq!(buckets.len(), bucket_ranges.len());
-            change_bucket_version = self.update_buckets(
-                cfg,
-                next_bucket_version,
-                buckets,
-                region_epoch,
-                &bucket_ranges,
-            );
+        if let Some(bucket_ranges) = bucket_ranges {
+            if self.bucket_stat.is_some() {
+                assert_eq!(buckets.len(), bucket_ranges.len());
+                change_bucket_version = self.update_buckets(
+                    cfg,
+                    next_bucket_version,
+                    buckets,
+                    region_epoch,
+                    &bucket_ranges,
+                );
+            } else {
+                change_bucket_version = true;
+                // when the region buckets is none, the exclusive buckets includes all the
+                // bucket keys.
+                self.init_buckets(cfg, next_bucket_version, buckets, region_epoch, region);
+            }
         } else {
             change_bucket_version = true;
             // when the region buckets is none, the exclusive buckets includes all the
@@ -606,11 +611,10 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
         region: &Region,
         start_key: Option<Vec<u8>>,
         end_key: Option<Vec<u8>>,
-        split_reason: SplitReason,
+        reason: SplitReason,
         policy: CheckPolicy,
         bucket_ranges: Option<Vec<BucketRange>>,
     ) {
-        let auto_split = split_reason != SplitReason::Admin;
         let mut cached;
         let tablet = match &self.engine {
             Either::Left(e) => e,
@@ -649,7 +653,7 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
         CHECK_SPILT_COUNTER.all.inc();
         let mut host = self
             .coprocessor
-            .new_split_checker_host(region, tablet, auto_split, policy);
+            .new_split_checker_host(region, tablet, reason, policy);
 
         if host.skip() {
             debug!("skip split check";
@@ -751,7 +755,7 @@ impl<EK: KvEngine, S: StoreHandle> Runner<EK, S> {
             );
 
             let region_epoch = region.get_region_epoch().clone();
-            let source = match split_reason {
+            let source = match reason {
                 SplitReason::Size => "split_checker_by_size",
                 SplitReason::Load => "split_checker_by_load",
                 _ => "split_checker_by_admin",
@@ -1014,7 +1018,10 @@ where
                     let mut host = self.coprocessor.new_split_checker_host(
                         &region,
                         tablet,
-                        false,
+                        // Only estimates and refreshes region bucket information.
+                        // No split keys are generated and no split is triggered.
+                        // Treated as an Admin operation.
+                        SplitReason::Admin,
                         CheckPolicy::Approximate,
                     );
                     if let Err(e) = self.approximate_check_bucket(tablet, &region, &mut host, None)

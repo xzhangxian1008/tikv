@@ -17,7 +17,7 @@ use dashmap::DashMap;
 use encryption::{BackupEncryptionManager, EncrypterReader, Iv, MultiMasterKeyBackend};
 use encryption_export::create_async_backend;
 use engine_traits::{CF_DEFAULT, CF_LOCK, CF_WRITE, CfName};
-use external_storage::{BackendConfig, ExternalStorage, UnpinReader, create_storage};
+use external_storage::{BackendConfig, ExternalStorage, HdfsConfig, UnpinReader, create_storage};
 use file_system::Sha256Reader;
 use futures::io::Cursor;
 use kvproto::{
@@ -51,7 +51,8 @@ use tokio::{
 use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
 use tracing::instrument;
 use tracing_active_tree::frame;
-use txn_types::{Key, Lock, TimeStamp, WriteRef};
+use txn_types::{Key, TimeStamp, WriteRef};
+use uuid::Uuid;
 
 use super::errors::Result;
 use crate::{
@@ -203,18 +204,20 @@ impl ApplyEvents {
             if cf == CF_LOCK {
                 match cmd_type {
                     CmdType::Put => {
-                        match Lock::parse(&value).map_err(|err| {
+                        match txn_types::parse_lock(&value).map_err(|err| {
                             annotate!(
                                 err,
                                 "failed to parse lock (value = {})",
                                 utils::redact(&value)
                             )
                         }) {
-                            Ok(lock) => {
-                                if utils::should_track_lock(&lock) {
-                                    resolver
-                                        .track_lock(lock.ts, key, lock.generation)
-                                        .map_err(|_| Error::OutOfQuota { region_id })?;
+                            Ok(lock_or_shared_locks) => {
+                                if let Either::Left(lock) = lock_or_shared_locks {
+                                    if utils::should_track_lock(&lock) {
+                                        resolver
+                                            .track_lock(lock.ts, key, lock.generation)
+                                            .map_err(|_| Error::OutOfQuota { region_id })?;
+                                    }
                                 }
                             }
                             Err(err) => err.report(format!("region id = {}", region_id)),
@@ -340,6 +343,7 @@ pub struct Config {
     pub temp_file_size_limit: u64,
     pub temp_file_memory_quota: u64,
     pub max_flush_interval: Duration,
+    pub s3_multi_part_size: usize,
 }
 
 impl From<BackupStreamConfig> for Config {
@@ -348,11 +352,13 @@ impl From<BackupStreamConfig> for Config {
         let temp_file_size_limit = value.file_size_limit.0;
         let temp_file_memory_quota = value.temp_file_memory_quota.0;
         let max_flush_interval = value.max_flush_interval.0;
+        let s3_multi_part_size = value.s3_multi_part_size.0 as usize;
         Self {
             prefix,
             temp_file_size_limit,
             temp_file_memory_quota,
             max_flush_interval,
+            s3_multi_part_size,
         }
     }
 }
@@ -410,6 +416,9 @@ pub struct RouterInner {
 
     /// Backup encryption manager
     backup_encryption_manager: BackupEncryptionManager,
+
+    /// S3 multi part size
+    s3_multi_part_size: AtomicUsize,
 }
 
 impl std::fmt::Debug for RouterInner {
@@ -437,6 +446,7 @@ impl RouterInner {
             temp_file_memory_quota: AtomicU64::new(config.temp_file_memory_quota),
             max_flush_interval: SyncRwLock::new(config.max_flush_interval),
             backup_encryption_manager,
+            s3_multi_part_size: AtomicUsize::new(config.s3_multi_part_size),
         }
     }
 
@@ -509,12 +519,17 @@ impl RouterInner {
         let cfg = self.tempfile_config_for_task(&task);
         let backup_encryption_manager =
             self.build_backup_encryption_manager_for_task(&task).await?;
+        let backend_config = BackendConfig {
+            s3_multi_part_size: self.s3_multi_part_size.load(Ordering::Relaxed),
+            hdfs_config: HdfsConfig::default(),
+        };
         let stream_task = StreamTaskHandler::new(
             task,
             ranges.clone(),
             merged_file_size_limit,
             cfg,
             backup_encryption_manager,
+            backend_config,
         )
         .await?;
         self.tasks.insert(task_name.clone(), Arc::new(stream_task));
@@ -723,34 +738,29 @@ impl RouterInner {
     /// of this flush. returns `None` if failed.
     #[instrument(skip(self, cx))]
     pub async fn do_flush(&self, cx: FlushContext<'_>) -> Option<u64> {
-        let task = self.tasks.get(cx.task_name);
-        match task {
-            Some(task_handler) => {
-                let result = task_handler.do_flush(cx).await;
-                // set false to flushing whether success or fail
-                task_handler.set_flushing_status(false);
+        let task_handler = match self.get_task_handler(cx.task_name) {
+            Ok(h) => h,
+            Err(_) => return None,
+        };
+        let result = task_handler.do_flush(cx).await;
+        // set false to flushing whether success or fail
+        task_handler.set_flushing_status(false);
 
-                if let Err(e) = result {
-                    e.report("failed to flush task.");
-                    warn!("backup steam do flush fail"; "err" => ?e);
-                    if task_handler.flush_failure_count() > FLUSH_FAILURE_BECOME_FATAL_THRESHOLD {
-                        // NOTE: Maybe we'd better record all errors and send them to the client?
-                        try_send!(
-                            self.scheduler,
-                            Task::FatalError(
-                                TaskSelector::ByName(cx.task_name.to_owned()),
-                                Box::new(e)
-                            )
-                        );
-                    }
-                    return None;
-                }
-                // if succeed in flushing, update flush_time. Or retry do_flush immediately.
-                task_handler.update_flush_time();
-                result.ok().flatten()
+        if let Err(e) = result {
+            e.report("failed to flush task.");
+            warn!("backup steam do flush fail"; "err" => ?e);
+            if task_handler.flush_failure_count() > FLUSH_FAILURE_BECOME_FATAL_THRESHOLD {
+                // NOTE: Maybe we'd better record all errors and send them to the client?
+                try_send!(
+                    self.scheduler,
+                    Task::FatalError(TaskSelector::ByName(cx.task_name.to_owned()), Box::new(e))
+                );
             }
-            _ => None,
+            return None;
         }
+        // if succeed in flushing, update flush_time. Or retry do_flush immediately.
+        task_handler.update_flush_time();
+        result.ok().flatten()
     }
 
     #[instrument(skip(self))]
@@ -880,7 +890,7 @@ impl TempFileKey {
     fn format_date_time(ts: u64, t: FormatType) -> impl Display {
         use chrono::prelude::*;
         let millis = TimeStamp::physical(ts.into());
-        let dt = Utc.timestamp_millis(millis as _);
+        let dt = Utc.timestamp_millis_opt(millis as _).unwrap();
         match t {
             FormatType::Date => dt.format("%Y%m%d"),
             FormatType::Hour => dt.format("%H"),
@@ -1018,13 +1028,11 @@ impl StreamTaskHandler {
         merged_file_size_limit: u64,
         temp_pool_cfg: tempfiles::Config,
         backup_encryption_manager: BackupEncryptionManager,
+        backend_config: BackendConfig,
     ) -> Result<Self> {
         let temp_dir = &temp_pool_cfg.swap_files;
         tokio::fs::create_dir_all(temp_dir).await?;
-        let storage = Arc::from(create_storage(
-            task.info.get_storage(),
-            BackendConfig::default(),
-        )?);
+        let storage = Arc::from(create_storage(task.info.get_storage(), backend_config)?);
         let start_ts = task.info.get_start_ts();
         Ok(Self {
             task,
@@ -1413,7 +1421,8 @@ impl StreamTaskHandler {
         &self,
         metadata_info: MetadataInfo,
         flush_ts: TimeStamp,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
+        let mut meta_files = vec![];
         if !metadata_info.file_groups.is_empty() {
             let mut min_begin_ts = u64::MAX;
             for file_group in metadata_info.file_groups.as_slice() {
@@ -1435,8 +1444,9 @@ impl StreamTaskHandler {
                 )
                 .await
                 .context(format_args!("flush meta {:?}", meta_path))?;
+            meta_files.push(meta_path);
         }
-        Ok(())
+        Ok(meta_files)
     }
 
     /// get the total count of adjacent error.
@@ -1490,7 +1500,8 @@ impl StreamTaskHandler {
             // flush meta file to storage.
             self.fill_region_info(cx, &mut backup_metadata);
             // flush backup metadata to external storage.
-            self.flush_backup_metadata(backup_metadata, cx.flush_ts)
+            let meta_files = self
+                .flush_backup_metadata(backup_metadata, cx.flush_ts)
                 .await?;
             crate::metrics::FLUSH_DURATION
                 .with_label_values(&["save_files"])
@@ -1505,6 +1516,7 @@ impl StreamTaskHandler {
                 .iter()
                 .for_each(|(size, _)| crate::metrics::FLUSH_FILE_SIZE.observe(*size as _));
             info!("log backup flush done";
+                "meta_files" => ?meta_files,
                 "merged_files" => %file_size_vec.len(),    // the number of the merged files
                 "files" => %file_size_vec.iter().map(|(_, v)| v).sum::<usize>(),
                 "total_size" => %file_size_vec.iter().map(|(v, _)| v).sum::<u64>(), // the size of the merged files after compressed
@@ -1797,12 +1809,24 @@ impl MetadataInfo {
     }
 
     fn path_to_meta(&self, min_begin_ts: u64, flush_ts: u64) -> String {
+        // It is possible for flush_ts to be set to zero when PD is unavailable.
+        // In this scenario, a "tso" from the local clock will be synthesized.
+        // A special suffix needs to be appended to avoid file name collision.
+        let mut actual_flush_ts = flush_ts;
+        let suffix = if flush_ts == 0 {
+            actual_flush_ts = TimeStamp::compose(TimeStamp::physical_now(), 0).into_inner();
+            let uuid = Uuid::new_v4().as_u128();
+            format!("-SYNTHETIC{:X}", uuid)
+        } else {
+            String::new()
+        };
         format!(
-            "v1/backupmeta/{:016X}-{:016X}-{:016X}-{:016X}.meta",
-            flush_ts,
+            "v1/backupmeta/{:016X}-{:016X}-{:016X}-{:016X}{}.meta",
+            actual_flush_ts,
             min_begin_ts,
             self.min_ts.unwrap_or_default(),
             self.max_ts.unwrap_or_default(),
+            suffix
         )
     }
 }
@@ -2099,6 +2123,7 @@ mod tests {
                 temp_file_size_limit: 1024,
                 temp_file_memory_quota: 1024 * 2,
                 max_flush_interval: Duration::from_secs(300),
+                s3_multi_part_size: ReadableSize::mb(5).0 as usize,
             },
             BackupEncryptionManager::default(),
         );
@@ -2198,6 +2223,7 @@ mod tests {
                 temp_file_size_limit: 32,
                 temp_file_memory_quota: 32 * 2,
                 max_flush_interval: Duration::from_secs(300),
+                s3_multi_part_size: ReadableSize::mb(5).0 as usize,
             },
             BackupEncryptionManager::default(),
         );
@@ -2353,6 +2379,7 @@ mod tests {
             merged_file_size_limit,
             make_tempfiles_cfg(tmp_dir.path()),
             BackupEncryptionManager::default(),
+            BackendConfig::default(),
         )
         .await
         .unwrap();
@@ -2481,6 +2508,7 @@ mod tests {
                 temp_file_size_limit: 1,
                 temp_file_memory_quota: 2,
                 max_flush_interval: Duration::from_secs(300),
+                s3_multi_part_size: ReadableSize::mb(5).0 as usize,
             },
             BackupEncryptionManager::default(),
         ));
@@ -2520,6 +2548,7 @@ mod tests {
                 temp_file_size_limit: 32,
                 temp_file_memory_quota: 32 * 2,
                 max_flush_interval: Duration::from_secs(300),
+                s3_multi_part_size: ReadableSize::mb(5).0 as usize,
             },
             BackupEncryptionManager::default(),
         );
@@ -2563,6 +2592,7 @@ mod tests {
                 temp_file_size_limit: 1,
                 temp_file_memory_quota: 2,
                 max_flush_interval: Duration::from_secs(300),
+                s3_multi_part_size: ReadableSize::mb(5).0 as usize,
             },
             BackupEncryptionManager::default(),
         ));
@@ -2618,6 +2648,7 @@ mod tests {
                 temp_file_size_limit: 1,
                 temp_file_memory_quota: 2,
                 max_flush_interval: Duration::from_secs(300),
+                s3_multi_part_size: ReadableSize::mb(5).0 as usize,
             },
             BackupEncryptionManager::default(),
         ));
@@ -2755,6 +2786,7 @@ mod tests {
             0x100000,
             make_tempfiles_cfg(tmp_dir.path()),
             backup_encryption_manager,
+            BackendConfig::default(),
         )
         .await
         .unwrap();
@@ -2877,7 +2909,7 @@ mod tests {
         let kv_event = build_kv_event(1, 1);
         let tmp_key = TempFileKey::of(&kv_event.events[0], 1);
         data_file.inner.done().await?;
-        let mut files = vec![(tmp_key, data_file, info)];
+        let mut files = [(tmp_key, data_file, info)];
 
         let stream_task = StreamTask {
             info: StreamBackupTaskInfo::default(),
@@ -2911,6 +2943,7 @@ mod tests {
                 temp_file_size_limit: 1,
                 temp_file_memory_quota: 2,
                 max_flush_interval: cfg.max_flush_interval.0,
+                s3_multi_part_size: cfg.s3_multi_part_size.0 as usize,
             },
             BackupEncryptionManager::default(),
         ));
@@ -2968,6 +3001,7 @@ mod tests {
                 temp_file_size_limit: 1000,
                 temp_file_memory_quota: 2,
                 max_flush_interval: Duration::from_secs(300),
+                s3_multi_part_size: ReadableSize::mb(5).0 as usize,
             },
             BackupEncryptionManager::default(),
         ));
@@ -3120,6 +3154,7 @@ mod tests {
             merged_file_size_limit,
             make_tempfiles_cfg(tempfile::tempdir().unwrap().path()),
             backup_encryption_manager.clone(),
+            BackendConfig::default(),
         )
         .await
         .unwrap();
@@ -3336,5 +3371,37 @@ mod tests {
             kv_pairs.push((apply_event.key.clone(), apply_event.value.clone()));
         }
         kv_pairs
+    }
+
+    #[test]
+    fn test_path_to_meta() {
+        let mut meta = MetadataInfo::with_capacity(0);
+        meta.min_ts = Some(100);
+        meta.max_ts = Some(200);
+
+        // Case 1: Normal flush_ts
+        let path = meta.path_to_meta(50, 300);
+        assert_eq!(
+            path,
+            "v1/backupmeta/000000000000012C-0000000000000032-0000000000000064-00000000000000C8.meta"
+        );
+
+        // Case 2: flush_ts is 0
+        let path_synthetic = meta.path_to_meta(50, 0);
+        let another_path_synthetic = meta.path_to_meta(50, 0);
+        // synthetic paths should be unique due to different UUIDs
+        assert_ne!(another_path_synthetic, path_synthetic);
+
+        // Verify the synthetic path format with regex
+        let synthetic_pattern = regex::Regex::new(
+            r"^v1/backupmeta/([0-9A-F]{16})-[0-9A-F]{16}-[0-9A-F]{16}-[0-9A-F]{16}-SYNTHETIC[0-9A-F]+\.meta$"
+        ).unwrap();
+        let capture = synthetic_pattern
+            .captures(&path_synthetic)
+            .unwrap_or_else(|| panic!("non match: {}", path_synthetic));
+
+        // Check that the timestamp part is not 0 anymore (it uses physical_now)
+        let ts = u64::from_str_radix(capture.get(1).unwrap().as_str(), 16).unwrap();
+        assert_ne!(ts, 0);
     }
 }

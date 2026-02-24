@@ -4,14 +4,17 @@ use std::{cmp::Ordering, sync::Arc};
 
 use async_trait::async_trait;
 use tidb_query_common::{Result, storage::IntervalRange};
-use tipb::{FieldType, Expr};
 use tidb_query_datatype::{
     codec::{batch::LazyBatchColumnVec, data_type::*},
     expr::{EvalConfig, EvalContext, EvalWarnings},
 };
-use tidb_query_expr::{RpnStackNode, RpnExpression, RpnExpressionBuilder};
+use tidb_query_expr::{RpnExpression, RpnExpressionBuilder, RpnStackNode};
+use tipb::{Expr, FieldType};
 
-use crate::{interface::*, util::{ensure_columns_decoded, eval_exprs_decoded_no_lifetime}};
+use crate::{
+    interface::*,
+    util::{ensure_columns_decoded, eval_exprs_decoded_no_lifetime},
+};
 
 /// Executor that retrieves rows from the source executor
 /// and only produces part of the rows.
@@ -21,7 +24,7 @@ pub struct BatchLimitExecutor<Src: BatchExecutor> {
     is_src_scan_executor: bool,
 
     context: EvalContext,
-    
+
     truncate_keys_exps: Vec<RpnExpression>,
     truncate_keys_field_type: Vec<FieldType>,
     truncate_key_num: usize,
@@ -60,9 +63,15 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         limit: usize,
         is_src_scan_executor: bool,
         config: Arc<EvalConfig>,
-        truncate_key_exp: Vec<RpnExpression>
+        truncate_key_exp: Vec<RpnExpression>,
     ) -> Result<Self> {
-        return Self::new_rank_limit_impl(src, limit, is_src_scan_executor, config, truncate_key_exp)
+        return Self::new_rank_limit_impl(
+            src,
+            limit,
+            is_src_scan_executor,
+            config,
+            truncate_key_exp,
+        );
     }
 
     pub fn new_rank_limit_impl(
@@ -70,7 +79,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         limit: usize,
         is_src_scan_executor: bool,
         config: Arc<EvalConfig>,
-        truncate_key_exp: Vec<RpnExpression>
+        truncate_key_exp: Vec<RpnExpression>,
     ) -> Result<Self> {
         let truncate_key_num = truncate_key_exp.len();
         let truncate_keys_field_type: Vec<FieldType> = truncate_key_exp
@@ -98,8 +107,8 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         limit: usize,
         is_src_scan_executor: bool,
         config: Arc<EvalConfig>,
-        truncate_key_exp_defs: Vec<Expr>) -> Result<Self> {
-        
+        truncate_key_exp_defs: Vec<Expr>,
+    ) -> Result<Self> {
         let schema_len = src.schema().len();
         let mut truncate_key_exp = Vec::with_capacity(truncate_key_exp_defs.len());
         let mut ctx = EvalContext::new(config.clone());
@@ -108,13 +117,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                 def, &mut ctx, schema_len,
             )?);
         }
-        Self::new_rank_limit_impl(
-            src,
-            limit,
-            is_src_scan_executor,
-            config,
-            truncate_key_exp
-        )
+        Self::new_rank_limit_impl(src, limit, is_src_scan_executor, config, truncate_key_exp)
     }
 
     #[cfg(test)]
@@ -124,7 +127,11 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
 
     // Record the truncate key values for the last row
     #[inline]
-    fn record_truncate_key_values(&mut self, result: &mut BatchExecuteResult, idx: usize) -> Result<()> {
+    fn record_truncate_key_values(
+        &mut self,
+        result: &mut BatchExecuteResult,
+        idx: usize,
+    ) -> Result<()> {
         let src_schema = self.src.schema();
         let mut res = ensure_columns_decoded(
             &mut self.context,
@@ -134,8 +141,10 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
             &result.logical_rows,
         );
         match res {
-            Ok(_) => {},
-            Err(err) => {return Err(err);}
+            Ok(_) => {}
+            Err(err) => {
+                return Err(err);
+            }
         }
 
         self.current_truncate_keys_unsafe.clear();
@@ -150,8 +159,10 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
             );
 
             match res {
-                Ok(_) => {},
-                Err(err) => {return Err(err);}
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(err);
+                }
             }
         }
 
@@ -161,13 +172,21 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         }
 
         self.prev_truncate_keys.clear();
-        self.prev_truncate_keys.extend(cur_truncate_keys_ref.drain(..).map(ScalarValueRef::to_owned));
+        self.prev_truncate_keys.extend(
+            cur_truncate_keys_ref
+                .drain(..)
+                .map(ScalarValueRef::to_owned),
+        );
         cur_truncate_keys_ref.clear();
         Ok(())
     }
 
     #[inline]
-    fn find_different_truncate_key_row(&mut self, result: &mut BatchExecuteResult, start_idx: usize) -> Result<usize> {
+    fn find_different_truncate_key_row(
+        &mut self,
+        result: &mut BatchExecuteResult,
+        start_idx: usize,
+    ) -> Result<usize> {
         let src_schema = self.src.schema();
         // Decode columns with mutable input first, so subsequent access to input can be
         // immutable (and the borrow checker will be happy)
@@ -179,8 +198,10 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
             &result.logical_rows,
         );
         match res {
-            Ok(_) => {},
-            Err(err) => {return Err(err);}
+            Ok(_) => {}
+            Err(err) => {
+                return Err(err);
+            }
         }
 
         self.current_truncate_keys_unsafe.clear();
@@ -195,8 +216,10 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
             );
 
             match res {
-                Ok(_) => {},
-                Err(err) => {return Err(err);}
+                Ok(_) => {}
+                Err(err) => {
+                    return Err(err);
+                }
             }
         }
 
@@ -209,14 +232,22 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
             }
 
             if self.prev_truncate_keys.len() == 0 {
-                self.prev_truncate_keys.extend(cur_truncate_keys_ref.drain(..).map(ScalarValueRef::to_owned));
+                self.prev_truncate_keys.extend(
+                    cur_truncate_keys_ref
+                        .drain(..)
+                        .map(ScalarValueRef::to_owned),
+                );
                 cur_truncate_keys_ref.clear();
                 i += 1;
                 continue;
             }
 
             let truncate_key_match = || -> Result<bool> {
-                match self.prev_truncate_keys.chunks_exact(self.truncate_key_num).next() {
+                match self
+                    .prev_truncate_keys
+                    .chunks_exact(self.truncate_key_num)
+                    .next()
+                {
                     Some(current_key) => {
                         for preifx_key_col_index in 0..self.truncate_key_num {
                             if current_key[preifx_key_col_index]
@@ -244,8 +275,10 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                     } else {
                         return Ok(i);
                     }
-                },
-                Err(err) => {return Err(err);}
+                }
+                Err(err) => {
+                    return Err(err);
+                }
             }
 
             i += 1;
@@ -283,16 +316,19 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
         } else {
             scan_rows
         };
-        
-        if self.truncate_keys_exps.len() > 0 {  
-            #[cfg(debug_assertions)] { self.executed_in_rank_limit_for_test = true; }
+
+        if self.truncate_keys_exps.len() > 0 {
+            #[cfg(debug_assertions)]
+            {
+                self.executed_in_rank_limit_for_test = true;
+            }
 
             if self.remaining_rows == 0 && self.prev_truncate_keys.len() == 0 {
                 return BatchExecuteResult {
                     physical_columns: LazyBatchColumnVec::empty(),
                     logical_rows: Vec::new(),
                     warnings: EvalWarnings::default(),
-                    is_drained: Ok(BatchExecIsDrain::Drain)
+                    is_drained: Ok(BatchExecIsDrain::Drain),
                 };
             }
 
@@ -312,27 +348,53 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
                 self.remaining_rows -= output_row_num;
 
                 // Record truncate key values for further search
-                let res = self.record_truncate_key_values(&mut result, output_row_num-1);
+                let res = self.record_truncate_key_values(&mut result, output_row_num - 1);
                 match res {
-                    Ok(_) => {},
-                    Err(err) => {return BatchExecuteResult{is_drained:Err(err), physical_columns: result.physical_columns, logical_rows: result.logical_rows, warnings: EvalWarnings::default()}}
+                    Ok(_) => {}
+                    Err(err) => {
+                        return BatchExecuteResult {
+                            is_drained: Err(err),
+                            physical_columns: result.physical_columns,
+                            logical_rows: result.logical_rows,
+                            warnings: EvalWarnings::default(),
+                        };
+                    }
                 }
             } else {
-                // When self.remaining_rows == 0, it means that previous truncate key values have been recorded before.
+                // When self.remaining_rows == 0, it means that previous truncate key values
+                // have been recorded before.
                 if self.remaining_rows != 0 {
                     // Record truncate key values for further search
-                    let res = self.record_truncate_key_values(&mut result, self.remaining_rows-1);
+                    let res = self.record_truncate_key_values(&mut result, self.remaining_rows - 1);
                     match res {
-                        Ok(_) => {},
-                        Err(err) => {return BatchExecuteResult{is_drained:Err(err), physical_columns: result.physical_columns, logical_rows: result.logical_rows, warnings: EvalWarnings::default()}}
+                        Ok(_) => {}
+                        Err(err) => {
+                            return BatchExecuteResult {
+                                is_drained: Err(err),
+                                physical_columns: result.physical_columns,
+                                logical_rows: result.logical_rows,
+                                warnings: EvalWarnings::default(),
+                            };
+                        }
                     }
                 }
 
-                // Traverse remaining rows, so that we can find the row whose truncate key values are different the prev.
-                let end_idx = self.find_different_truncate_key_row(&mut result, self.remaining_rows);
+                // Traverse remaining rows, so that we can find the row whose truncate key
+                // values are different the prev.
+                let end_idx =
+                    self.find_different_truncate_key_row(&mut result, self.remaining_rows);
                 match end_idx {
-                    Ok(v) => {output_row_num = v;}
-                    Err(err) => {return BatchExecuteResult{is_drained:Err(err), physical_columns: result.physical_columns, logical_rows: result.logical_rows, warnings: EvalWarnings::default()}}
+                    Ok(v) => {
+                        output_row_num = v;
+                    }
+                    Err(err) => {
+                        return BatchExecuteResult {
+                            is_drained: Err(err),
+                            physical_columns: result.physical_columns,
+                            logical_rows: result.logical_rows,
+                            warnings: EvalWarnings::default(),
+                        };
+                    }
                 }
                 self.remaining_rows = 0;
             }
@@ -345,7 +407,10 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
             result.logical_rows.truncate(output_row_num);
             return result;
         } else {
-            #[cfg(debug_assertions)] { self.executed_in_limit_for_test = true; }
+            #[cfg(debug_assertions)]
+            {
+                self.executed_in_limit_for_test = true;
+            }
 
             let mut result = self.src.next_batch(real_scan_rows).await;
             if result.logical_rows.len() < self.remaining_rows {
@@ -386,9 +451,11 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
 mod tests {
     use futures::executor::block_on;
     use tidb_query_datatype::{
-        builder::FieldTypeBuilder, codec::{batch::LazyBatchColumnVec, data_type::VectorValue}, expr::EvalWarnings, Collation, FieldTypeTp
+        Collation, FieldTypeTp,
+        builder::FieldTypeBuilder,
+        codec::{batch::LazyBatchColumnVec, data_type::VectorValue},
+        expr::EvalWarnings,
     };
-
     use tidb_query_expr::RpnExpressionBuilder;
 
     use super::*;
@@ -660,11 +727,17 @@ mod tests {
         );
 
         let config = Arc::new(EvalConfig::default());
-        let truncate_key_exp = 
-            RpnExpressionBuilder::new_for_test()
-                .push_column_ref_for_test(1)
-                .build_for_test();
-        let mut exec = BatchLimitExecutor::new_rank_limit_for_test(src_exec, 0, true, config, vec![truncate_key_exp]).unwrap();
+        let truncate_key_exp = RpnExpressionBuilder::new_for_test()
+            .push_column_ref_for_test(1)
+            .build_for_test();
+        let mut exec = BatchLimitExecutor::new_rank_limit_for_test(
+            src_exec,
+            0,
+            true,
+            config,
+            vec![truncate_key_exp],
+        )
+        .unwrap();
 
         let r = block_on(exec.next_batch(1));
         assert!(r.logical_rows.is_empty());
@@ -692,35 +765,47 @@ mod tests {
         for i in 0..limits.len() {
             let src_exec = MockExecutor::new(
                 vec![
-                    FieldTypeBuilder::new().tp(FieldTypeTp::VarString).collation(Collation::Utf8Mb4Bin).build(),
-                    FieldTypeBuilder::new().tp(FieldTypeTp::VarString).collation(Collation::Utf8Mb4Bin).build(),
+                    FieldTypeBuilder::new()
+                        .tp(FieldTypeTp::VarString)
+                        .collation(Collation::Utf8Mb4Bin)
+                        .build(),
+                    FieldTypeBuilder::new()
+                        .tp(FieldTypeTp::VarString)
+                        .collation(Collation::Utf8Mb4Bin)
+                        .build(),
                 ],
                 vec![BatchExecuteResult {
                     physical_columns: LazyBatchColumnVec::from(vec![
-                        VectorValue::Bytes(vec![
-                            Some(b"val1".to_vec()),
-                            Some(b"val2".to_vec()),
-                            Some(b"val3".to_vec()),
-                            Some(b"val4".to_vec()),
-                            Some(b"val5".to_vec()),
-                            Some(b"val6".to_vec()),
-                            Some(b"val7".to_vec()),
-                            Some(b"val8".to_vec()),
-                            Some(b"val9".to_vec()),
-                            Some(b"val10".to_vec()),
-                        ].into()),
-                        VectorValue::Bytes(vec![
-                            Some(b"group1".to_vec()),
-                            Some(b"group1".to_vec()),
-                            Some(b"group1".to_vec()),
-                            Some(b"group2".to_vec()),
-                            Some(b"group3".to_vec()),
-                            Some(b"group3".to_vec()),
-                            Some(b"group3".to_vec()),
-                            Some(b"group3".to_vec()),
-                            Some(b"group4".to_vec()),
-                            Some(b"group5".to_vec()),
-                        ].into()),
+                        VectorValue::Bytes(
+                            vec![
+                                Some(b"val1".to_vec()),
+                                Some(b"val2".to_vec()),
+                                Some(b"val3".to_vec()),
+                                Some(b"val4".to_vec()),
+                                Some(b"val5".to_vec()),
+                                Some(b"val6".to_vec()),
+                                Some(b"val7".to_vec()),
+                                Some(b"val8".to_vec()),
+                                Some(b"val9".to_vec()),
+                                Some(b"val10".to_vec()),
+                            ]
+                            .into(),
+                        ),
+                        VectorValue::Bytes(
+                            vec![
+                                Some(b"group1".to_vec()),
+                                Some(b"group1".to_vec()),
+                                Some(b"group1".to_vec()),
+                                Some(b"group2".to_vec()),
+                                Some(b"group3".to_vec()),
+                                Some(b"group3".to_vec()),
+                                Some(b"group3".to_vec()),
+                                Some(b"group3".to_vec()),
+                                Some(b"group4".to_vec()),
+                                Some(b"group5".to_vec()),
+                            ]
+                            .into(),
+                        ),
                     ]),
                     logical_rows: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
                     warnings: EvalWarnings::default(),
@@ -729,12 +814,18 @@ mod tests {
             );
 
             let config = Arc::new(EvalConfig::default());
-            let truncate_key_exp = 
-                RpnExpressionBuilder::new_for_test()
-                    .push_column_ref_for_test(1)
-                    .build_for_test();
+            let truncate_key_exp = RpnExpressionBuilder::new_for_test()
+                .push_column_ref_for_test(1)
+                .build_for_test();
 
-            let mut exec = BatchLimitExecutor::new_rank_limit_for_test(src_exec, limits[i], true, config, vec![truncate_key_exp]).unwrap();
+            let mut exec = BatchLimitExecutor::new_rank_limit_for_test(
+                src_exec,
+                limits[i],
+                true,
+                config,
+                vec![truncate_key_exp],
+            )
+            .unwrap();
 
             let r = block_on(exec.next_batch(10));
             assert_eq!(r.logical_rows, results[i]);
@@ -753,7 +844,9 @@ mod tests {
 
     #[test]
     fn test_rank_limit_several_chunks() {
-        let limits = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 100];
+        let limits = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 100,
+        ];
         let results = vec![
             vec![],
             vec![0],
@@ -782,20 +875,24 @@ mod tests {
         for i in 0..limits.len() {
             let src_exec = MockExecutor::new(
                 vec![
-                    FieldTypeBuilder::new().tp(FieldTypeTp::VarString).collation(Collation::Binary).build(),
-                    FieldTypeBuilder::new().tp(FieldTypeTp::VarString).collation(Collation::Binary).build(),
+                    FieldTypeBuilder::new()
+                        .tp(FieldTypeTp::VarString)
+                        .collation(Collation::Binary)
+                        .build(),
+                    FieldTypeBuilder::new()
+                        .tp(FieldTypeTp::VarString)
+                        .collation(Collation::Binary)
+                        .build(),
                 ],
                 vec![
                     BatchExecuteResult {
                         physical_columns: LazyBatchColumnVec::from(vec![
-                            VectorValue::Bytes(vec![
-                                Some(b"val1".to_vec()),
-                                Some(b"val2".to_vec()),
-                            ].into()),
-                            VectorValue::Bytes(vec![
-                                Some(b"group1".to_vec()),
-                                Some(b"group2".to_vec()),
-                            ].into()),
+                            VectorValue::Bytes(
+                                vec![Some(b"val1".to_vec()), Some(b"val2".to_vec())].into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![Some(b"group1".to_vec()), Some(b"group2".to_vec())].into(),
+                            ),
                         ]),
                         logical_rows: vec![0, 1],
                         warnings: EvalWarnings::default(),
@@ -803,20 +900,26 @@ mod tests {
                     },
                     BatchExecuteResult {
                         physical_columns: LazyBatchColumnVec::from(vec![
-                            VectorValue::Bytes(vec![
-                                Some(b"val3".to_vec()),
-                                Some(b"val4".to_vec()),
-                                Some(b"val5".to_vec()),
-                                Some(b"val6".to_vec()),
-                                Some(b"val7".to_vec()),
-                            ].into()),
-                            VectorValue::Bytes(vec![
-                                Some(b"group3".to_vec()),
-                                Some(b"group4".to_vec()),
-                                Some(b"group4".to_vec()),
-                                Some(b"group4".to_vec()),
-                                Some(b"group5".to_vec()),
-                            ].into()),
+                            VectorValue::Bytes(
+                                vec![
+                                    Some(b"val3".to_vec()),
+                                    Some(b"val4".to_vec()),
+                                    Some(b"val5".to_vec()),
+                                    Some(b"val6".to_vec()),
+                                    Some(b"val7".to_vec()),
+                                ]
+                                .into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![
+                                    Some(b"group3".to_vec()),
+                                    Some(b"group4".to_vec()),
+                                    Some(b"group4".to_vec()),
+                                    Some(b"group4".to_vec()),
+                                    Some(b"group5".to_vec()),
+                                ]
+                                .into(),
+                            ),
                         ]),
                         logical_rows: vec![0, 1, 2, 3, 4],
                         warnings: EvalWarnings::default(),
@@ -824,16 +927,22 @@ mod tests {
                     },
                     BatchExecuteResult {
                         physical_columns: LazyBatchColumnVec::from(vec![
-                            VectorValue::Bytes(vec![
-                                Some(b"val8".to_vec()),
-                                Some(b"val9".to_vec()),
-                                Some(b"val10".to_vec()),
-                            ].into()),
-                            VectorValue::Bytes(vec![
-                                Some(b"group5".to_vec()),
-                                Some(b"group5".to_vec()),
-                                Some(b"group5".to_vec()),
-                            ].into()),
+                            VectorValue::Bytes(
+                                vec![
+                                    Some(b"val8".to_vec()),
+                                    Some(b"val9".to_vec()),
+                                    Some(b"val10".to_vec()),
+                                ]
+                                .into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![
+                                    Some(b"group5".to_vec()),
+                                    Some(b"group5".to_vec()),
+                                    Some(b"group5".to_vec()),
+                                ]
+                                .into(),
+                            ),
                         ]),
                         logical_rows: vec![0, 1, 2],
                         warnings: EvalWarnings::default(),
@@ -841,12 +950,8 @@ mod tests {
                     },
                     BatchExecuteResult {
                         physical_columns: LazyBatchColumnVec::from(vec![
-                            VectorValue::Bytes(vec![
-                                Some(b"val11".to_vec()),
-                            ].into()),
-                            VectorValue::Bytes(vec![
-                                Some(b"group5".to_vec()),
-                            ].into()),
+                            VectorValue::Bytes(vec![Some(b"val11".to_vec())].into()),
+                            VectorValue::Bytes(vec![Some(b"group5".to_vec())].into()),
                         ]),
                         logical_rows: vec![0],
                         warnings: EvalWarnings::default(),
@@ -854,16 +959,22 @@ mod tests {
                     },
                     BatchExecuteResult {
                         physical_columns: LazyBatchColumnVec::from(vec![
-                            VectorValue::Bytes(vec![
-                                Some(b"val12".to_vec()),
-                                Some(b"val13".to_vec()),
-                                Some(b"val14".to_vec()),
-                            ].into()),
-                            VectorValue::Bytes(vec![
-                                Some(b"group5".to_vec()),
-                                Some(b"group6".to_vec()),
-                                Some(b"group6".to_vec()),
-                            ].into()),
+                            VectorValue::Bytes(
+                                vec![
+                                    Some(b"val12".to_vec()),
+                                    Some(b"val13".to_vec()),
+                                    Some(b"val14".to_vec()),
+                                ]
+                                .into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![
+                                    Some(b"group5".to_vec()),
+                                    Some(b"group6".to_vec()),
+                                    Some(b"group6".to_vec()),
+                                ]
+                                .into(),
+                            ),
                         ]),
                         logical_rows: vec![0, 1, 2],
                         warnings: EvalWarnings::default(),
@@ -871,12 +982,8 @@ mod tests {
                     },
                     BatchExecuteResult {
                         physical_columns: LazyBatchColumnVec::from(vec![
-                            VectorValue::Bytes(vec![
-                                Some(b"val15".to_vec()),
-                            ].into()),
-                            VectorValue::Bytes(vec![
-                                Some(b"group7".to_vec()),
-                            ].into()),
+                            VectorValue::Bytes(vec![Some(b"val15".to_vec())].into()),
+                            VectorValue::Bytes(vec![Some(b"group7".to_vec())].into()),
                         ]),
                         logical_rows: vec![0],
                         warnings: EvalWarnings::default(),
@@ -884,16 +991,22 @@ mod tests {
                     },
                     BatchExecuteResult {
                         physical_columns: LazyBatchColumnVec::from(vec![
-                            VectorValue::Bytes(vec![
-                                Some(b"val16".to_vec()),
-                                Some(b"val17".to_vec()),
-                                Some(b"val18".to_vec()),
-                            ].into()),
-                            VectorValue::Bytes(vec![
-                                Some(b"group8".to_vec()),
-                                Some(b"group8".to_vec()),
-                                Some(b"group9".to_vec()),
-                            ].into()),
+                            VectorValue::Bytes(
+                                vec![
+                                    Some(b"val16".to_vec()),
+                                    Some(b"val17".to_vec()),
+                                    Some(b"val18".to_vec()),
+                                ]
+                                .into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![
+                                    Some(b"group8".to_vec()),
+                                    Some(b"group8".to_vec()),
+                                    Some(b"group9".to_vec()),
+                                ]
+                                .into(),
+                            ),
                         ]),
                         logical_rows: vec![0, 1, 2],
                         warnings: EvalWarnings::default(),
@@ -901,14 +1014,12 @@ mod tests {
                     },
                     BatchExecuteResult {
                         physical_columns: LazyBatchColumnVec::from(vec![
-                            VectorValue::Bytes(vec![
-                                Some(b"val19".to_vec()),
-                                Some(b"val20".to_vec()),
-                            ].into()),
-                            VectorValue::Bytes(vec![
-                                Some(b"group10".to_vec()),
-                                Some(b"group10".to_vec()),
-                            ].into()),
+                            VectorValue::Bytes(
+                                vec![Some(b"val19".to_vec()), Some(b"val20".to_vec())].into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![Some(b"group10".to_vec()), Some(b"group10".to_vec())].into(),
+                            ),
                         ]),
                         logical_rows: vec![0, 1],
                         warnings: EvalWarnings::default(),
@@ -918,11 +1029,17 @@ mod tests {
             );
 
             let config = Arc::new(EvalConfig::default());
-            let truncate_key_exp = 
-                RpnExpressionBuilder::new_for_test()
-                    .push_column_ref_for_test(1)
-                    .build_for_test();
-            let mut exec = BatchLimitExecutor::new_rank_limit_for_test(src_exec, limits[i], true, config, vec![truncate_key_exp]).unwrap();
+            let truncate_key_exp = RpnExpressionBuilder::new_for_test()
+                .push_column_ref_for_test(1)
+                .build_for_test();
+            let mut exec = BatchLimitExecutor::new_rank_limit_for_test(
+                src_exec,
+                limits[i],
+                true,
+                config,
+                vec![truncate_key_exp],
+            )
+            .unwrap();
 
             let mut actual_logical_rows: Vec<usize> = vec![];
 
@@ -941,7 +1058,9 @@ mod tests {
 
     #[test]
     fn test_rank_limit_with_ci_collation() {
-        let limits = vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 100];
+        let limits = vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 100,
+        ];
         let results = vec![
             vec![],
             vec![0],
@@ -970,147 +1089,171 @@ mod tests {
         for i in 0..limits.len() {
             let src_exec = MockExecutor::new(
                 vec![
-                    FieldTypeBuilder::new().tp(FieldTypeTp::VarString).collation(Collation::Utf8Mb4GeneralCi).build(),
-                    FieldTypeBuilder::new().tp(FieldTypeTp::VarString).collation(Collation::Utf8Mb4GeneralCi).build(),
+                    FieldTypeBuilder::new()
+                        .tp(FieldTypeTp::VarString)
+                        .collation(Collation::Utf8Mb4GeneralCi)
+                        .build(),
+                    FieldTypeBuilder::new()
+                        .tp(FieldTypeTp::VarString)
+                        .collation(Collation::Utf8Mb4GeneralCi)
+                        .build(),
                 ],
-                    vec![
-                        BatchExecuteResult {
-                            physical_columns: LazyBatchColumnVec::from(vec![
-                                VectorValue::Bytes(vec![
-                                    Some(b"val1".to_vec()),
-                                    Some(b"val2".to_vec()),
-                                ].into()),
-                                VectorValue::Bytes(vec![
-                                    Some(b"group1".to_vec()),
-                                    Some(b"group2".to_vec()),
-                                ].into()),
-                            ]),
-                            logical_rows: vec![0, 1],
-                            warnings: EvalWarnings::default(),
-                            is_drained: Ok(BatchExecIsDrain::Remain),
-                        },
-                        BatchExecuteResult {
-                            physical_columns: LazyBatchColumnVec::from(vec![
-                                VectorValue::Bytes(vec![
+                vec![
+                    BatchExecuteResult {
+                        physical_columns: LazyBatchColumnVec::from(vec![
+                            VectorValue::Bytes(
+                                vec![Some(b"val1".to_vec()), Some(b"val2".to_vec())].into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![Some(b"group1".to_vec()), Some(b"group2".to_vec())].into(),
+                            ),
+                        ]),
+                        logical_rows: vec![0, 1],
+                        warnings: EvalWarnings::default(),
+                        is_drained: Ok(BatchExecIsDrain::Remain),
+                    },
+                    BatchExecuteResult {
+                        physical_columns: LazyBatchColumnVec::from(vec![
+                            VectorValue::Bytes(
+                                vec![
                                     Some(b"val3".to_vec()),
                                     Some(b"val4".to_vec()),
                                     Some(b"val5".to_vec()),
                                     Some(b"val6".to_vec()),
                                     Some(b"val7".to_vec()),
-                                ].into()),
-                                VectorValue::Bytes(vec![
+                                ]
+                                .into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![
                                     Some(b"group3".to_vec()),
                                     Some(b"group4".to_vec()),
                                     Some(b"groUp4".to_vec()),
                                     Some(b"gRoup4".to_vec()),
                                     Some(b"group5".to_vec()),
-                                ].into()),
-                            ]),
-                            logical_rows: vec![0, 1, 2, 3, 4],
-                            warnings: EvalWarnings::default(),
-                            is_drained: Ok(BatchExecIsDrain::Remain),
-                        },
-                        BatchExecuteResult {
-                            physical_columns: LazyBatchColumnVec::from(vec![
-                                VectorValue::Bytes(vec![
+                                ]
+                                .into(),
+                            ),
+                        ]),
+                        logical_rows: vec![0, 1, 2, 3, 4],
+                        warnings: EvalWarnings::default(),
+                        is_drained: Ok(BatchExecIsDrain::Remain),
+                    },
+                    BatchExecuteResult {
+                        physical_columns: LazyBatchColumnVec::from(vec![
+                            VectorValue::Bytes(
+                                vec![
                                     Some(b"val8".to_vec()),
                                     Some(b"val9".to_vec()),
                                     Some(b"val10".to_vec()),
-                                ].into()),
-                                VectorValue::Bytes(vec![
+                                ]
+                                .into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![
                                     Some(b"group5".to_vec()),
                                     Some(b"groUP5".to_vec()),
                                     Some(b"group5".to_vec()),
-                                ].into()),
-                            ]),
-                            logical_rows: vec![0, 1, 2],
-                            warnings: EvalWarnings::default(),
-                            is_drained: Ok(BatchExecIsDrain::Remain),
-                        },
-                        BatchExecuteResult {
-                            physical_columns: LazyBatchColumnVec::from(vec![
-                                VectorValue::Bytes(vec![
-                                    Some(b"val11".to_vec()),
-                                ].into()),
-                                VectorValue::Bytes(vec![
-                                    Some(b"gRoup5".to_vec()),
-                                ].into()),
-                            ]),
-                            logical_rows: vec![0],
-                            warnings: EvalWarnings::default(),
-                            is_drained: Ok(BatchExecIsDrain::Remain),
-                        },
-                        BatchExecuteResult {
-                            physical_columns: LazyBatchColumnVec::from(vec![
-                                VectorValue::Bytes(vec![
+                                ]
+                                .into(),
+                            ),
+                        ]),
+                        logical_rows: vec![0, 1, 2],
+                        warnings: EvalWarnings::default(),
+                        is_drained: Ok(BatchExecIsDrain::Remain),
+                    },
+                    BatchExecuteResult {
+                        physical_columns: LazyBatchColumnVec::from(vec![
+                            VectorValue::Bytes(vec![Some(b"val11".to_vec())].into()),
+                            VectorValue::Bytes(vec![Some(b"gRoup5".to_vec())].into()),
+                        ]),
+                        logical_rows: vec![0],
+                        warnings: EvalWarnings::default(),
+                        is_drained: Ok(BatchExecIsDrain::Remain),
+                    },
+                    BatchExecuteResult {
+                        physical_columns: LazyBatchColumnVec::from(vec![
+                            VectorValue::Bytes(
+                                vec![
                                     Some(b"val12".to_vec()),
                                     Some(b"val13".to_vec()),
                                     Some(b"val14".to_vec()),
-                                ].into()),
-                                VectorValue::Bytes(vec![
+                                ]
+                                .into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![
                                     Some(b"group5".to_vec()),
                                     Some(b"group6".to_vec()),
                                     Some(b"GROUP6".to_vec()),
-                                ].into()),
-                            ]),
-                            logical_rows: vec![0, 1, 2],
-                            warnings: EvalWarnings::default(),
-                            is_drained: Ok(BatchExecIsDrain::Remain),
-                        },
-                        BatchExecuteResult {
-                            physical_columns: LazyBatchColumnVec::from(vec![
-                                VectorValue::Bytes(vec![
-                                    Some(b"val15".to_vec()),
-                                ].into()),
-                                VectorValue::Bytes(vec![
-                                    Some(b"grOup7".to_vec()),
-                                ].into()),
-                            ]),
-                            logical_rows: vec![0],
-                            warnings: EvalWarnings::default(),
-                            is_drained: Ok(BatchExecIsDrain::Remain),
-                        },
-                        BatchExecuteResult {
-                            physical_columns: LazyBatchColumnVec::from(vec![
-                                VectorValue::Bytes(vec![
+                                ]
+                                .into(),
+                            ),
+                        ]),
+                        logical_rows: vec![0, 1, 2],
+                        warnings: EvalWarnings::default(),
+                        is_drained: Ok(BatchExecIsDrain::Remain),
+                    },
+                    BatchExecuteResult {
+                        physical_columns: LazyBatchColumnVec::from(vec![
+                            VectorValue::Bytes(vec![Some(b"val15".to_vec())].into()),
+                            VectorValue::Bytes(vec![Some(b"grOup7".to_vec())].into()),
+                        ]),
+                        logical_rows: vec![0],
+                        warnings: EvalWarnings::default(),
+                        is_drained: Ok(BatchExecIsDrain::Remain),
+                    },
+                    BatchExecuteResult {
+                        physical_columns: LazyBatchColumnVec::from(vec![
+                            VectorValue::Bytes(
+                                vec![
                                     Some(b"val16".to_vec()),
                                     Some(b"val17".to_vec()),
                                     Some(b"val18".to_vec()),
-                                ].into()),
-                                VectorValue::Bytes(vec![
+                                ]
+                                .into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![
                                     Some(b"GROUP8".to_vec()),
                                     Some(b"group8".to_vec()),
                                     Some(b"group9".to_vec()),
-                                ].into()),
-                            ]),
-                            logical_rows: vec![0, 1, 2],
-                            warnings: EvalWarnings::default(),
-                            is_drained: Ok(BatchExecIsDrain::Remain),
-                        },
-                        BatchExecuteResult {
-                            physical_columns: LazyBatchColumnVec::from(vec![
-                                VectorValue::Bytes(vec![
-                                    Some(b"val19".to_vec()),
-                                    Some(b"val20".to_vec()),
-                                ].into()),
-                                VectorValue::Bytes(vec![
-                                    Some(b"gRoup10".to_vec()),
-                                    Some(b"grouP10".to_vec()),
-                                ].into()),
-                            ]),
-                            logical_rows: vec![0, 1],
-                            warnings: EvalWarnings::default(),
-                            is_drained: Ok(BatchExecIsDrain::Drain),
-                        },
-                    ],
+                                ]
+                                .into(),
+                            ),
+                        ]),
+                        logical_rows: vec![0, 1, 2],
+                        warnings: EvalWarnings::default(),
+                        is_drained: Ok(BatchExecIsDrain::Remain),
+                    },
+                    BatchExecuteResult {
+                        physical_columns: LazyBatchColumnVec::from(vec![
+                            VectorValue::Bytes(
+                                vec![Some(b"val19".to_vec()), Some(b"val20".to_vec())].into(),
+                            ),
+                            VectorValue::Bytes(
+                                vec![Some(b"gRoup10".to_vec()), Some(b"grouP10".to_vec())].into(),
+                            ),
+                        ]),
+                        logical_rows: vec![0, 1],
+                        warnings: EvalWarnings::default(),
+                        is_drained: Ok(BatchExecIsDrain::Drain),
+                    },
+                ],
             );
-            
+
             let config = Arc::new(EvalConfig::default());
-            let truncate_key_exp = 
-                RpnExpressionBuilder::new_for_test()
-                    .push_column_ref_for_test(1)
-                    .build_for_test();
-            let mut exec = BatchLimitExecutor::new_rank_limit_for_test(src_exec, limits[i], true, config, vec![truncate_key_exp]).unwrap();
+            let truncate_key_exp = RpnExpressionBuilder::new_for_test()
+                .push_column_ref_for_test(1)
+                .build_for_test();
+            let mut exec = BatchLimitExecutor::new_rank_limit_for_test(
+                src_exec,
+                limits[i],
+                true,
+                config,
+                vec![truncate_key_exp],
+            )
+            .unwrap();
 
             let mut actual_logical_rows: Vec<usize> = vec![];
 
