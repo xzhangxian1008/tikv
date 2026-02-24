@@ -311,7 +311,7 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
             scan_rows
         };
 
-        if !self.truncate_keys_exps.empty() {
+        if !self.truncate_keys_exps.is_empty() {
             #[cfg(debug_assertions)]
             {
                 self.executed_in_rank_limit_for_test = true;
