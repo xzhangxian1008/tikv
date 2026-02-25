@@ -58,6 +58,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         })
     }
 
+    #[cfg(test)]
     pub fn new_rank_limit_for_test(
         src: Src,
         limit: usize,
@@ -95,7 +96,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         })
     }
 
-    // truncate_key_exp_defs: Vec<RpnExpression>
+    // truncate_key_exp_defs: Vec<Expr>
     pub fn new_rank_limit(
         src: Src,
         limit: usize,
@@ -127,37 +128,24 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         idx: usize,
     ) -> Result<()> {
         let src_schema = self.src.schema();
-        let mut res = ensure_columns_decoded(
+        let _res = ensure_columns_decoded(
             &mut self.context,
             &self.truncate_keys_exps,
             src_schema,
             &mut result.physical_columns,
             &result.logical_rows,
-        );
-        match res {
-            Ok(_) => {}
-            Err(err) => {
-                return Err(err);
-            }
-        }
+        )?;
 
         self.current_truncate_keys_unsafe.clear();
         unsafe {
-            res = eval_exprs_decoded_no_lifetime(
+            let _res = eval_exprs_decoded_no_lifetime(
                 &mut self.context,
                 &self.truncate_keys_exps,
                 src_schema,
                 &result.physical_columns,
                 &result.logical_rows,
                 &mut self.current_truncate_keys_unsafe,
-            );
-
-            match res {
-                Ok(_) => {}
-                Err(err) => {
-                    return Err(err);
-                }
-            }
+            )?;
         }
 
         let mut cur_truncate_keys_ref = Vec::with_capacity(self.truncate_keys_exps.len());
@@ -184,23 +172,17 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
         let src_schema = self.src.schema();
         // Decode columns with mutable input first, so subsequent access to input can be
         // immutable (and the borrow checker will be happy)
-        let mut res = ensure_columns_decoded(
+        let _res = ensure_columns_decoded(
             &mut self.context,
             &self.truncate_keys_exps,
             src_schema,
             &mut result.physical_columns,
             &result.logical_rows,
-        );
-        match res {
-            Ok(_) => {}
-            Err(err) => {
-                return Err(err);
-            }
-        }
+        )?;
 
         self.current_truncate_keys_unsafe.clear();
         unsafe {
-            res = eval_exprs_decoded_no_lifetime(
+            let _res = eval_exprs_decoded_no_lifetime(
                 &mut self.context,
                 &self.truncate_keys_exps,
                 src_schema,
@@ -208,19 +190,12 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                 &result.logical_rows,
                 &mut self.current_truncate_keys_unsafe,
             );
-
-            match res {
-                Ok(_) => {}
-                Err(err) => {
-                    return Err(err);
-                }
-            }
         }
 
         let total_row_num = result.logical_rows.len();
-        let mut i = start_idx;
         let mut cur_truncate_keys_ref = Vec::with_capacity(self.truncate_keys_exps.len());
-        while i < total_row_num {
+        for i in start_idx..total_row_num {
+            cur_truncate_keys_ref.clear();
             for cur_truncate_key_result in &self.current_truncate_keys_unsafe {
                 cur_truncate_keys_ref.push(cur_truncate_key_result.get_logical_scalar_ref(i));
             }
@@ -231,42 +206,36 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                         .drain(..)
                         .map(ScalarValueRef::to_owned),
                 );
-                cur_truncate_keys_ref.clear();
-                i += 1;
                 continue;
             }
 
-            let truncate_key_match = || -> Result<bool> {
-                match self
+            let res = match self
                     .prev_truncate_keys
                     .chunks_exact(self.truncate_key_num)
                     .next()
                 {
                     Some(current_key) => {
-                        for preifx_key_col_index in 0..self.truncate_key_num {
-                            if current_key[preifx_key_col_index]
+                        let mut matched = true;
+                        for prefix_key_col_index in 0..self.truncate_key_num {
+                            if current_key[prefix_key_col_index]
                                 .as_scalar_value_ref()
                                 .cmp_sort_key(
-                                    &cur_truncate_keys_ref[preifx_key_col_index],
-                                    &self.truncate_keys_field_type[preifx_key_col_index],
+                                    &cur_truncate_keys_ref[prefix_key_col_index],
+                                    &self.truncate_keys_field_type[prefix_key_col_index],
                                 )?
                                 != Ordering::Equal
                             {
-                                return Ok(false);
+                                matched = false;
+                                break;
                             }
                         }
-                        Ok(true)
+                        Ok(matched)
                     }
                     _ => Ok(false),
-                }
-            };
-
-            let res = truncate_key_match();
+                };
             match res {
                 Ok(v) => {
-                    if v {
-                        cur_truncate_keys_ref.clear();
-                    } else {
+                    if !v {
                         return Ok(i);
                     }
                 }
@@ -274,10 +243,8 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                     return Err(err);
                 }
             }
-
-            i += 1;
         }
-        Ok(i)
+        Ok(total_row_num)
     }
 }
 
@@ -374,7 +341,7 @@ impl<Src: BatchExecutor> BatchExecutor for BatchLimitExecutor<Src> {
                 }
 
                 // Traverse remaining rows, so that we can find the row whose truncate key
-                // values are different the prev.
+                // values are different with the prev.
                 let end_idx =
                     self.find_different_truncate_key_row(&mut result, self.remaining_rows);
                 match end_idx {
