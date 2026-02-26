@@ -209,39 +209,28 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                 continue;
             }
 
-            let res = match self
-                    .prev_truncate_keys
-                    .chunks_exact(self.truncate_key_num)
-                    .next()
+            let prev_key = match self.prev_truncate_keys.get(..self.truncate_key_num) {
+                Some(k) => k,
+                None => return Err(other_err!("It's impossible to reach to here")),
+            };
+
+            let mut matched = true;
+            for prefix_key_col_index in 0..self.truncate_key_num {
+                if prev_key[prefix_key_col_index]
+                    .as_scalar_value_ref()
+                    .cmp_sort_key(
+                        &cur_truncate_keys_ref[prefix_key_col_index],
+                        &self.truncate_keys_field_type[prefix_key_col_index],
+                    )?
+                    != Ordering::Equal
                 {
-                    Some(current_key) => {
-                        let mut matched = true;
-                        for prefix_key_col_index in 0..self.truncate_key_num {
-                            if current_key[prefix_key_col_index]
-                                .as_scalar_value_ref()
-                                .cmp_sort_key(
-                                    &cur_truncate_keys_ref[prefix_key_col_index],
-                                    &self.truncate_keys_field_type[prefix_key_col_index],
-                                )?
-                                != Ordering::Equal
-                            {
-                                matched = false;
-                                break;
-                            }
-                        }
-                        Ok(matched)
-                    }
-                    _ => Ok(false),
-                };
-            match res {
-                Ok(v) => {
-                    if !v {
-                        return Ok(i);
-                    }
+                    matched = false;
+                    break;
                 }
-                Err(err) => {
-                    return Err(err);
-                }
+            }
+            
+            if !matched {
+                return Ok(i);
             }
         }
         Ok(total_row_num)
