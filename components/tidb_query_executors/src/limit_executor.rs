@@ -228,7 +228,7 @@ impl<Src: BatchExecutor> BatchLimitExecutor<Src> {
                     break;
                 }
             }
-            
+
             if !matched {
                 return Ok(i);
             }
